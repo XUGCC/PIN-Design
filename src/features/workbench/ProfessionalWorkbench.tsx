@@ -47,17 +47,6 @@ import {
 } from "./storage";
 import { formatElapsed, pauseTimer, startTimer, timerElapsed } from "./timer";
 
-type BeforeInstallPromptEvent = Event & {
-  prompt: () => Promise<void>;
-  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
-};
-
-declare global {
-  interface Window {
-    __pwaInstallPrompt?: BeforeInstallPromptEvent | null;
-  }
-}
-
 type PreprocessDraft = ImagePreprocessDraft & { mode: "photo" | "pattern" };
 
 const STAGES: Array<{ id: WorkbenchStage; label: string }> = [
@@ -110,7 +99,6 @@ export default function ProfessionalWorkbench() {
   const [installOpen, setInstallOpen] = useState(false);
   const [installTab, setInstallTab] = useState<"android" | "ios">("android");
   const [gallery, setGallery] = useState<Awaited<ReturnType<typeof listProjects>>>([]);
-  const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [standalone, setStandalone] = useState(false);
   const [locateRequest, setLocateRequest] = useState(0);
   const [toast, setToast] = useState("");
@@ -174,29 +162,15 @@ export default function ProfessionalWorkbench() {
 
   useEffect(() => {
     const displayMode = window.matchMedia("(display-mode: standalone)");
-    const handler = (event: Event) => {
-      event.preventDefault();
-      const promptEvent = event as BeforeInstallPromptEvent;
-      window.__pwaInstallPrompt = promptEvent;
-      setInstallPrompt(promptEvent);
-    };
-    const promptReady = () => setInstallPrompt(window.__pwaInstallPrompt ?? null);
     const updateStandalone = () => setStandalone(isStandalone());
     const installed = () => {
-      window.__pwaInstallPrompt = null;
-      setInstallPrompt(null);
       updateStandalone();
-      notify("安装完成，请关闭当前网页并从桌面新图标打开");
+      notify("浏览器已完成安装，请从桌面或应用列表打开");
     };
     updateStandalone();
-    promptReady();
-    window.addEventListener("beforeinstallprompt", handler);
-    window.addEventListener("pwa-install-ready", promptReady);
     window.addEventListener("appinstalled", installed);
     displayMode.addEventListener?.("change", updateStandalone);
     return () => {
-      window.removeEventListener("beforeinstallprompt", handler);
-      window.removeEventListener("pwa-install-ready", promptReady);
       window.removeEventListener("appinstalled", installed);
       displayMode.removeEventListener?.("change", updateStandalone);
     };
@@ -529,35 +503,6 @@ export default function ProfessionalWorkbench() {
     if (source) downloadProject(source, true);
   };
 
-  const installApp = async () => {
-    const promptEvent = installPrompt ?? window.__pwaInstallPrompt ?? null;
-    if (!promptEvent) {
-      setInstallOpen(true);
-      return;
-    }
-    try {
-      await promptEvent.prompt();
-      const result = await promptEvent.userChoice;
-      window.__pwaInstallPrompt = null;
-      setInstallPrompt(null);
-      if (result.outcome === "accepted") {
-        notify("安装完成后，请从桌面新图标打开独立 App");
-      } else {
-        setInstallOpen(true);
-      }
-    } catch (error) {
-      console.error(error);
-      window.__pwaInstallPrompt = null;
-      setInstallPrompt(null);
-      setInstallOpen(true);
-    }
-  };
-
-  const openInChromeForInstall = () => {
-    const fallbackUrl = encodeURIComponent("https://xugcc.github.io/PIN-Design/?source=install");
-    window.location.href = `intent://xugcc.github.io/PIN-Design/?source=install#Intent;scheme=https;package=com.android.chrome;S.browser_fallback_url=${fallbackUrl};end`;
-  };
-
   if (loading) {
     return <main className="wb-loading"><div className="wb-loader" /><p>正在载入主页…</p></main>;
   }
@@ -606,7 +551,7 @@ export default function ProfessionalWorkbench() {
               <button
                 className="wb-home-install"
                 type="button"
-                onClick={() => installPrompt ? installApp() : setInstallOpen(true)}
+                onClick={() => setInstallOpen(true)}
               >安装应用</button>
             )}
           </div>
@@ -897,7 +842,7 @@ export default function ProfessionalWorkbench() {
         <Modal title="安装到手机主屏幕" onClose={() => setInstallOpen(false)}>
           {standalone ? <div className="wb-installed">✓ 已在独立应用模式中运行</div> : <>
             <Segmented options={[{ id: "android", label: "Android / 小米" }, { id: "ios", label: "iPhone / iPad" }]} value={installTab} onChange={(value) => { setInstallTab(value as "android" | "ios"); setPreferences((current) => ({ ...current, lastInstallPlatform: value as "android" | "ios" })); }} />
-            {installTab === "android" ? <div className="wb-install-guide"><div className="wb-device-badge">{installPrompt ? "当前浏览器支持独立 PWA 安装" : "当前浏览器未提供系统安装入口"}</div><ol><li>先删除桌面上会出现浏览器栏的旧网页快捷方式。</li><li>{installPrompt ? <>点击下方“<strong>立即安装应用</strong>”。</> : <>点击下方“<strong>用 Chrome 打开并安装</strong>”。</>}</li><li>在浏览器安装提示中确认“<strong>安装</strong>”，不要只选“添加网页快捷方式”。</li><li>安装完成后关闭当前网页，从桌面新图标打开；此时不会显示浏览器地址栏和底部菜单。</li></ol>{installPrompt ? <button className="wb-primary wb-wide" type="button" onClick={installApp}>立即安装应用</button> : <button className="wb-primary wb-wide" type="button" onClick={openInChromeForInstall}>用 Chrome 打开并安装</button>}<details open={!installPrompt}><summary>为什么当前浏览器不能直接安装？</summary><p>网页已经使用 standalone 独立显示模式，但是否提供真正的 PWA 安装仍由浏览器决定。小米 AI 浏览器若只创建网页快捷方式，打开后仍会有地址栏；请改用 Chrome 安装，并从新生成的桌面图标启动。</p></details></div> : <div className="wb-install-guide"><div className="wb-device-badge">iOS 使用 Safari 添加到主屏幕</div><ol><li>用 <strong>Safari</strong> 打开工作台的 HTTPS 地址。</li><li>点底部工具栏的“<strong>分享</strong>”按钮（方框向上箭头）。</li><li>向下滑并点“<strong>添加到主屏幕</strong>”。</li><li>确认名称后点右上角“添加”。</li></ol><p>如果看不到该选项，请确认不是在微信或其他 App 的内置浏览器中打开。</p></div>}
+            {installTab === "android" ? <div className="wb-install-guide"><div className="wb-device-badge">使用当前浏览器的原生“添加到桌面”</div><ol><li>用小米默认浏览器打开这个工作台。</li><li>打开浏览器菜单，点击“<strong>添加到桌面</strong>”。</li><li>如果系统询问“创建桌面快捷方式”权限，请选择允许。</li><li>回到桌面，从新图标打开；独立运行时不会显示浏览器地址栏和底部菜单。</li></ol><details><summary>提示安装完成但桌面没有图标？</summary><p>Chrome 可能只把应用加入系统应用列表，没有放到当前桌面。新版已取消 Chrome 强制安装和网页安装事件拦截，请像 lock-in 一样直接使用小米浏览器菜单“添加到桌面”。</p></details></div> : <div className="wb-install-guide"><div className="wb-device-badge">iOS 使用 Safari 添加到主屏幕</div><ol><li>用 <strong>Safari</strong> 打开工作台的 HTTPS 地址。</li><li>点底部工具栏的“<strong>分享</strong>”按钮（方框向上箭头）。</li><li>向下滑并点“<strong>添加到主屏幕</strong>”。</li><li>确认名称后点右上角“添加”。</li></ol><p>如果看不到该选项，请确认不是在微信或其他 App 的内置浏览器中打开。</p></div>}
           </>}
         </Modal>
       )}

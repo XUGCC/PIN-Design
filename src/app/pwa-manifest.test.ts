@@ -7,6 +7,7 @@ interface WebAppManifest {
   start_url?: string;
   scope?: string;
   display?: string;
+  display_override?: string[];
   icons?: Array<{ sizes?: string; purpose?: string }>;
 }
 
@@ -26,13 +27,8 @@ describe("PWA manifest", () => {
     expect(manifest.icons?.some((icon) => icon.sizes === "512x512" && icon.purpose?.includes("maskable"))).toBe(true);
   });
 
-  it("uses explicit GitHub Pages paths for stricter mobile browsers", () => {
-    const githubManifest = JSON.parse(
-      readFileSync(resolve(process.cwd(), "public/manifest.github.webmanifest"), "utf8"),
-    ) as WebAppManifest;
-    expect(githubManifest.id).toBe("/PIN-Design/");
-    expect(githubManifest.start_url).toBe("/PIN-Design/?source=pwa");
-    expect(githubManifest.scope).toBe("/PIN-Design/");
-    expect(githubManifest.display).toBe("standalone");
+  it("uses the same simple relative-path install model as lock-in", () => {
+    expect(manifest.id).toBeUndefined();
+    expect(manifest.display_override).toBeUndefined();
   });
 });
