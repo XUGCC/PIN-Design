@@ -27,8 +27,8 @@ describe("PWA manifest", () => {
     expect(manifest.icons?.some((icon) => icon.sizes === "512x512" && icon.purpose?.includes("maskable"))).toBe(true);
   });
 
-  it("uses the same simple relative-path install model as lock-in", () => {
-    expect(manifest.id).toBeUndefined();
+  it("has a stable app identity and does not override standalone mode", () => {
+    expect(manifest.id).toBe("./");
     expect(manifest.display_override).toBeUndefined();
   });
 });

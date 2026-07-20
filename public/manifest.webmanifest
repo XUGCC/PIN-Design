@@ -2,6 +2,7 @@
   "name": "七卡瓦拼豆专业工作台",
   "short_name": "拼豆工作台",
   "description": "在本地完成拼豆图纸优化、编辑、预览与制作引导。",
+  "id": "./",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

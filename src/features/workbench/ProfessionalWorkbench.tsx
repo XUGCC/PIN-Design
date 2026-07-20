@@ -35,6 +35,11 @@ import {
   saveImageToPhotos,
   validateImportFile,
 } from "./import-export";
+
+interface BeforeInstallPromptEvent extends Event {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
+}
 import {
   deleteProject,
   listProjects,
@@ -97,7 +102,8 @@ export default function ProfessionalWorkbench() {
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [installOpen, setInstallOpen] = useState(false);
-  const [installTab, setInstallTab] = useState<"android" | "ios">("android");
+  const [installTab, setInstallTab] = useState<"desktop" | "android" | "ios">("desktop");
+  const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [gallery, setGallery] = useState<Awaited<ReturnType<typeof listProjects>>>([]);
   const [standalone, setStandalone] = useState(false);
   const [locateRequest, setLocateRequest] = useState(0);
@@ -162,19 +168,45 @@ export default function ProfessionalWorkbench() {
 
   useEffect(() => {
     const displayMode = window.matchMedia("(display-mode: standalone)");
+    const captureInstallPrompt = (event: Event) => {
+      event.preventDefault();
+      setInstallPrompt(event as BeforeInstallPromptEvent);
+    };
     const updateStandalone = () => setStandalone(isStandalone());
     const installed = () => {
       updateStandalone();
+      setInstallPrompt(null);
+      setInstallOpen(false);
       notify("浏览器已完成安装，请从桌面或应用列表打开");
     };
+    const userAgent = navigator.userAgent;
+    setInstallTab(
+      /iPad|iPhone|iPod/.test(userAgent)
+        ? "ios"
+        : /Android/.test(userAgent)
+          ? "android"
+          : "desktop",
+    );
     updateStandalone();
+    window.addEventListener("beforeinstallprompt", captureInstallPrompt);
     window.addEventListener("appinstalled", installed);
     displayMode.addEventListener?.("change", updateStandalone);
     return () => {
+      window.removeEventListener("beforeinstallprompt", captureInstallPrompt);
       window.removeEventListener("appinstalled", installed);
       displayMode.removeEventListener?.("change", updateStandalone);
     };
   }, [notify]);
+
+  const installAsApp = async () => {
+    if (!installPrompt) return;
+    await installPrompt.prompt();
+    const choice = await installPrompt.userChoice;
+    if (choice.outcome === "accepted") {
+      setInstallPrompt(null);
+      notify("正在安装独立应用…");
+    }
+  };
 
   useEffect(() => {
     if (!project) return;
@@ -552,7 +584,7 @@ export default function ProfessionalWorkbench() {
                 className="wb-home-install"
                 type="button"
                 onClick={() => setInstallOpen(true)}
-              >安装应用</button>
+              >安装独立应用</button>
             )}
           </div>
           <div className="wb-start-hero">
@@ -839,10 +871,33 @@ export default function ProfessionalWorkbench() {
       )}
 
       {installOpen && (
-        <Modal title="安装到手机主屏幕" onClose={() => setInstallOpen(false)}>
+        <Modal title="安装为独立应用" onClose={() => setInstallOpen(false)}>
           {standalone ? <div className="wb-installed">✓ 已在独立应用模式中运行</div> : <>
-            <Segmented options={[{ id: "android", label: "Android / 小米" }, { id: "ios", label: "iPhone / iPad" }]} value={installTab} onChange={(value) => { setInstallTab(value as "android" | "ios"); setPreferences((current) => ({ ...current, lastInstallPlatform: value as "android" | "ios" })); }} />
-            {installTab === "android" ? <div className="wb-install-guide"><div className="wb-device-badge">使用当前浏览器的原生“添加到桌面”</div><ol><li>用小米默认浏览器打开这个工作台。</li><li>打开浏览器菜单，点击“<strong>添加到桌面</strong>”。</li><li>如果系统询问“创建桌面快捷方式”权限，请选择允许。</li><li>回到桌面，从新图标打开；独立运行时不会显示浏览器地址栏和底部菜单。</li></ol><details><summary>提示安装完成但桌面没有图标？</summary><p>Chrome 可能只把应用加入系统应用列表，没有放到当前桌面。新版已取消 Chrome 强制安装和网页安装事件拦截，请像 lock-in 一样直接使用小米浏览器菜单“添加到桌面”。</p></details></div> : <div className="wb-install-guide"><div className="wb-device-badge">iOS 使用 Safari 添加到主屏幕</div><ol><li>用 <strong>Safari</strong> 打开工作台的 HTTPS 地址。</li><li>点底部工具栏的“<strong>分享</strong>”按钮（方框向上箭头）。</li><li>向下滑并点“<strong>添加到主屏幕</strong>”。</li><li>确认名称后点右上角“添加”。</li></ol><p>如果看不到该选项，请确认不是在微信或其他 App 的内置浏览器中打开。</p></div>}
+            {installPrompt && (
+              <div className="wb-install-guide">
+                <div className="wb-device-badge">当前浏览器支持独立应用安装</div>
+                <button className="wb-primary" type="button" onClick={installAsApp}>立即安装独立应用</button>
+                <p>安装后请从新生成的应用图标打开，窗口不会显示地址栏和标签页。</p>
+              </div>
+            )}
+            <Segmented
+              options={[
+                { id: "desktop", label: "Windows / Mac" },
+                { id: "android", label: "Android" },
+                { id: "ios", label: "iPhone / iPad" },
+              ]}
+              value={installTab}
+              onChange={(value) => {
+                const platform = value as "desktop" | "android" | "ios";
+                setInstallTab(platform);
+                if (platform !== "desktop") {
+                  setPreferences((current) => ({ ...current, lastInstallPlatform: platform }));
+                }
+              }}
+            />
+            {installTab === "desktop" && <div className="wb-install-guide"><div className="wb-device-badge">使用 Chrome 或 Edge 的“安装应用”</div><ol><li>通过 <strong>HTTPS</strong> 地址打开工作台。</li><li>点击地址栏右侧的“安装”图标，或打开浏览器菜单并选择“<strong>安装 拼豆工作台</strong>”。</li><li>确认安装；如需桌面图标，可在安装完成后创建桌面快捷方式。</li><li>从“拼豆工作台”应用图标打开，而不是旧的网址快捷方式。</li></ol><p>菜单中的“创建快捷方式”只会生成网页链接，打开后仍有浏览器界面，请不要选它。</p></div>}
+            {installTab === "android" && <div className="wb-install-guide"><div className="wb-device-badge">优先使用 Chrome 的“安装应用”</div><ol><li>用 Chrome 打开工作台的 <strong>HTTPS</strong> 地址。</li><li>点右上角菜单，选择“<strong>安装应用</strong>”。如果上方有“立即安装独立应用”，也可直接点击。</li><li>安装完成后，从新的“拼豆工作台”图标打开。</li></ol><p>部分手机浏览器的“添加到桌面”只创建网页快捷方式，仍会显示地址栏。遇到这种情况请改用 Chrome 安装。</p></div>}
+            {installTab === "ios" && <div className="wb-install-guide"><div className="wb-device-badge">iOS 使用 Safari 添加到主屏幕</div><ol><li>用 <strong>Safari</strong> 打开工作台的 HTTPS 地址。</li><li>点“<strong>分享</strong>”按钮（方框向上箭头）。</li><li>选择“<strong>添加到主屏幕</strong>”，并确认以 Web App 方式打开。</li><li>从主屏幕的新图标启动。</li></ol><p>微信等内置浏览器创建的通常只是网页入口，请先在 Safari 中打开。</p></div>}
           </>}
         </Modal>
       )}
