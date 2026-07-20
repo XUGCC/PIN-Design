@@ -4,6 +4,21 @@ import "./globals.css";
 
 const githubPagesPath = process.env.GITHUB_PAGES === "1" ? "/PIN-Design" : "";
 const publicAsset = (fileName: string) => `${githubPagesPath}/${fileName}`;
+const manifestFile = process.env.GITHUB_PAGES === "1"
+  ? "manifest.github.webmanifest"
+  : "manifest.webmanifest";
+
+const pwaInstallBridge = `
+  window.__pwaInstallPrompt = window.__pwaInstallPrompt || null;
+  window.addEventListener("beforeinstallprompt", function (event) {
+    event.preventDefault();
+    window.__pwaInstallPrompt = event;
+    window.dispatchEvent(new Event("pwa-install-ready"));
+  });
+  window.addEventListener("appinstalled", function () {
+    window.__pwaInstallPrompt = null;
+  });
+`;
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -19,7 +34,7 @@ export const metadata: Metadata = {
   title: "七卡瓦拼豆专业工作台",
   applicationName: "拼豆工作台",
   description: "在设备本地完成拼豆图纸优化、编辑、预览与制作引导，支持离线安装。",
-  manifest: publicAsset("manifest.webmanifest"),
+  manifest: publicAsset(manifestFile),
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
@@ -44,6 +59,12 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="zh-CN">
+      <head>
+        <script
+          id="pwa-install-bridge"
+          dangerouslySetInnerHTML={{ __html: pwaInstallBridge }}
+        />
+      </head>
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased overflow-x-hidden bg-gray-50 text-gray-900`}>
         {children}
       </body>

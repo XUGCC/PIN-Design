@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 interface WebAppManifest {
+  id?: string;
   start_url?: string;
   scope?: string;
   display?: string;
@@ -23,5 +24,15 @@ describe("PWA manifest", () => {
   it("provides installable regular and maskable icons", () => {
     expect(manifest.icons?.some((icon) => icon.sizes === "192x192" && icon.purpose?.includes("maskable"))).toBe(true);
     expect(manifest.icons?.some((icon) => icon.sizes === "512x512" && icon.purpose?.includes("maskable"))).toBe(true);
+  });
+
+  it("uses explicit GitHub Pages paths for stricter mobile browsers", () => {
+    const githubManifest = JSON.parse(
+      readFileSync(resolve(process.cwd(), "public/manifest.github.webmanifest"), "utf8"),
+    ) as WebAppManifest;
+    expect(githubManifest.id).toBe("/PIN-Design/");
+    expect(githubManifest.start_url).toBe("/PIN-Design/?source=pwa");
+    expect(githubManifest.scope).toBe("/PIN-Design/");
+    expect(githubManifest.display).toBe("standalone");
   });
 });
