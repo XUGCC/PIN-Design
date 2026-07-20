@@ -1,0 +1,26 @@
+{
+  "name": "七卡瓦拼豆专业工作台",
+  "short_name": "拼豆工作台",
+  "description": "在本地完成拼豆图纸优化、编辑、预览与制作引导。",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f6f2ec",
+  "theme_color": "#d37d5d",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "./icon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
