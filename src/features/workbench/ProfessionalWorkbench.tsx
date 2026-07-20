@@ -2,10 +2,13 @@
 /* eslint-disable @next/next/no-img-element */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import ImagePreprocessEditor, {
+  type ImagePreprocessCompleteResult,
+  type ImagePreprocessDraft,
+} from "./ImagePreprocessEditor";
 import WorkbenchCanvas from "./WorkbenchCanvas";
 import { applyEditAction, type EditTool } from "./editing";
 import {
-  createBlankCells,
   createProject,
   projectProgress,
   type ColorSystem,
@@ -30,7 +33,6 @@ import {
   renderProjectPng,
   renderProjectThumbnail,
   saveImageToPhotos,
-  shareProject,
   validateImportFile,
 } from "./import-export";
 import {
@@ -50,22 +52,7 @@ type BeforeInstallPromptEvent = Event & {
   userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
 };
 
-interface PatternImportDraft {
-  file: File;
-  dataUrl: string;
-  imageWidth: number;
-  imageHeight: number;
-}
-
-interface PatternImportSettings {
-  width: number;
-  height: number;
-  cropTop: number;
-  cropRight: number;
-  cropBottom: number;
-  cropLeft: number;
-  whiteAsEmpty: boolean;
-}
+type PreprocessDraft = ImagePreprocessDraft & { mode: "photo" | "pattern" };
 
 const STAGES: Array<{ id: WorkbenchStage; label: string }> = [
   { id: "optimize", label: "优化" },
@@ -92,6 +79,14 @@ function resizeCells(cells: PixelCell[], oldWidth: number, oldHeight: number, wi
   });
 }
 
+function gridSizeForAspect(imageWidth: number, imageHeight: number, detail: number): { width: number; height: number } {
+  const longEdge = Math.max(1, Math.min(200, Math.round(detail)));
+  const aspect = imageWidth / Math.max(1, imageHeight);
+  return aspect >= 1
+    ? { width: longEdge, height: Math.max(1, Math.round(longEdge / aspect)) }
+    : { width: Math.max(1, Math.round(longEdge * aspect)), height: longEdge };
+}
+
 function isStandalone(): boolean {
   if (typeof window === "undefined") return false;
   return window.matchMedia("(display-mode: standalone)").matches || Boolean((navigator as Navigator & { standalone?: boolean }).standalone);
@@ -104,15 +99,13 @@ export default function ProfessionalWorkbench() {
   const [tool, setTool] = useState<EditTool>("paint");
   const [selectedColorId, setSelectedColorId] = useState(FULL_PALETTE[0]?.id ?? null);
   const [compareOriginal, setCompareOriginal] = useState(false);
-  const [blankWidth, setBlankWidth] = useState(40);
-  const [blankHeight, setBlankHeight] = useState(40);
   const [galleryOpen, setGalleryOpen] = useState(false);
-  const [importOpen, setImportOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [installOpen, setInstallOpen] = useState(false);
   const [installTab, setInstallTab] = useState<"android" | "ios">("android");
   const [gallery, setGallery] = useState<Awaited<ReturnType<typeof listProjects>>>([]);
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [standalone, setStandalone] = useState(false);
   const [locateRequest, setLocateRequest] = useState(0);
   const [toast, setToast] = useState("");
   const [now, setNow] = useState(Date.now());
@@ -121,27 +114,17 @@ export default function ProfessionalWorkbench() {
   const [paletteManagerOpen, setPaletteManagerOpen] = useState(false);
   const [showExclusions, setShowExclusions] = useState(false);
   const [paletteSearch, setPaletteSearch] = useState("");
-  const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [highlightColorId, setHighlightColorId] = useState<string | null>(null);
   const [includeExportStats, setIncludeExportStats] = useState(true);
   const [includeBackupSource, setIncludeBackupSource] = useState(true);
   const [preparedPhoto, setPreparedPhoto] = useState<{ key: string; blob: Blob; filename: string; title: string } | null>(null);
   const [preparingPhoto, setPreparingPhoto] = useState<"plain" | "codes" | null>(null);
-  const [patternDraft, setPatternDraft] = useState<PatternImportDraft | null>(null);
+  const [preprocessDraft, setPreprocessDraft] = useState<PreprocessDraft | null>(null);
   const [patternImporting, setPatternImporting] = useState(false);
   const [patternImportStatus, setPatternImportStatus] = useState("正在识别…");
-  const [patternSettings, setPatternSettings] = useState<PatternImportSettings>({
-    width: 40,
-    height: 40,
-    cropTop: 0,
-    cropRight: 0,
-    cropBottom: 0,
-    cropLeft: 0,
-    whiteAsEmpty: false,
-  });
   const imageInputRef = useRef<HTMLInputElement>(null);
   const patternInputRef = useRef<HTMLInputElement>(null);
-  const cameraInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
   const history = useRef<WorkbenchProject[]>([]);
   const future = useRef<WorkbenchProject[]>([]);
@@ -184,13 +167,27 @@ export default function ProfessionalWorkbench() {
   }, [notify]);
 
   useEffect(() => {
+    const displayMode = window.matchMedia("(display-mode: standalone)");
     const handler = (event: Event) => {
       event.preventDefault();
       setInstallPrompt(event as BeforeInstallPromptEvent);
     };
+    const updateStandalone = () => setStandalone(isStandalone());
+    const installed = () => {
+      setInstallPrompt(null);
+      setStandalone(true);
+      notify("应用已安装，可从手机桌面独立打开");
+    };
+    updateStandalone();
     window.addEventListener("beforeinstallprompt", handler);
-    return () => window.removeEventListener("beforeinstallprompt", handler);
-  }, []);
+    window.addEventListener("appinstalled", installed);
+    displayMode.addEventListener?.("change", updateStandalone);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", handler);
+      window.removeEventListener("appinstalled", installed);
+      displayMode.removeEventListener?.("change", updateStandalone);
+    };
+  }, [notify]);
 
   useEffect(() => {
     if (!project) return;
@@ -244,35 +241,33 @@ export default function ProfessionalWorkbench() {
     future.current = [];
   }, []);
 
-  const createBlank = () => {
-    const width = Math.max(1, Math.min(200, Math.round(blankWidth)));
-    const height = Math.max(1, Math.min(200, Math.round(blankHeight)));
-    activateProject(createProject({
-      name: `空白图纸 ${width}×${height}`,
-      palette: FULL_PALETTE,
-      cells: createBlankCells(width, height),
-      stage: "edit",
-      optimize: {
-        width,
-        height,
-        mode: "dominant",
-        mergeTolerance: 8,
-        removeBackground: false,
-        backgroundColor: "#FFFFFF",
-        excludedColorIds: [],
-      },
-      colorSystem: preferences.colorSystem,
-      bead: {
-        guidanceMode: "nearest",
-        unfinishedOpacity: preferences.unfinishedOpacity,
-        showSectionLines: true,
-        sectionInterval: 10,
-        showCountHints: false,
-        countDirection: "auto",
-        selectedColorId: null,
-        activeCellIndex: null,
-      },
-    }));
+  const returnHome = async () => {
+    setSettingsOpen(false);
+    if (project) {
+      try {
+        await saveProject(project, renderProjectThumbnail(project));
+        await refreshGallery();
+      } catch (error) {
+        console.error(error);
+        notify("返回主页前保存失败，项目仍保留在当前页面");
+        return;
+      }
+    }
+    setProject(null);
+  };
+
+  const openImageEditor = async (file: File, mode: "photo" | "pattern") => {
+    if (validateImportFile(file) !== "image") throw new Error("请选择 JPEG、PNG、WebP 或 GIF 图片");
+    if (file.size > 40 * 1024 * 1024) throw new Error("图片不能超过 40 MB");
+    const dataUrl = await readFileAsDataUrl(file);
+    const image = await loadImage(dataUrl);
+    setPreprocessDraft({
+      file,
+      dataUrl,
+      imageWidth: image.naturalWidth,
+      imageHeight: image.naturalHeight,
+      mode,
+    });
   };
 
   const handleFiles = async (files: FileList | File[]) => {
@@ -280,24 +275,18 @@ export default function ProfessionalWorkbench() {
     if (!file) return;
     try {
       const kind = validateImportFile(file);
-      let next: WorkbenchProject;
       if (kind === "image") {
-        const width = project?.optimize.width ?? Math.max(1, Math.min(200, blankWidth));
-        const height = project?.optimize.height ?? Math.max(1, Math.min(200, blankHeight));
-        next = await projectFromImage(file, width, height, project?.optimize.mode ?? "dominant", project?.palette ?? FULL_PALETTE);
-      } else {
-        next = await importProjectFile(file);
+        await openImageEditor(file, "photo");
+        return;
       }
-      if (kind !== "project") {
-        next = {
-          ...next,
-          colorSystem: preferences.colorSystem,
-          bead: { ...next.bead, unfinishedOpacity: preferences.unfinishedOpacity },
-        };
-      }
+      const imported = await importProjectFile(file);
+      const next = kind === "project" ? imported : {
+        ...imported,
+        colorSystem: preferences.colorSystem,
+        bead: { ...imported.bead, unfinishedOpacity: preferences.unfinishedOpacity },
+      };
       activateProject(next);
-      setImportOpen(false);
-      notify(kind === "image" && file.type === "image/gif" ? "已导入 GIF 第一帧" : "导入成功");
+      notify("项目导入成功");
     } catch (error) {
       notify(error instanceof Error ? error.message : "导入失败");
     }
@@ -316,54 +305,56 @@ export default function ProfessionalWorkbench() {
     input.value = "";
     if (!file) return;
     try {
-      if (validateImportFile(file) !== "image") throw new Error("请选择图片格式的成品图纸");
-      if (file.size > 40 * 1024 * 1024) throw new Error("图片不能超过 40 MB");
-      const dataUrl = await readFileAsDataUrl(file);
-      const image = await loadImage(dataUrl);
-      const width = Math.max(1, Math.min(200, Math.round(blankWidth) || 40));
-      const height = Math.max(1, Math.min(200, Math.round(width * image.naturalHeight / image.naturalWidth)));
-      setPatternSettings({
-        width,
-        height,
-        cropTop: 0,
-        cropRight: 0,
-        cropBottom: 0,
-        cropLeft: 0,
-        whiteAsEmpty: false,
-      });
-      setPatternDraft({ file, dataUrl, imageWidth: image.naturalWidth, imageHeight: image.naturalHeight });
-      setImportOpen(false);
+      await openImageEditor(file, "pattern");
     } catch (error) {
       notify(error instanceof Error ? error.message : "无法读取成品图纸");
     }
   };
 
-  const importFinishedPattern = async () => {
-    if (!patternDraft || patternImporting) return;
+  const completeImagePreprocess = async (result: ImagePreprocessCompleteResult) => {
+    if (!preprocessDraft || patternImporting) return;
     setPatternImporting(true);
-    setPatternImportStatus("正在分析图纸…");
     try {
-      let next = await projectFromPatternImage(
-        patternDraft.file,
-        {
-          ...patternSettings,
-          colorSystem: preferences.colorSystem,
-          onStatus: setPatternImportStatus,
-        },
-        project?.palette.length ? project.palette : FULL_PALETTE,
-      );
+      const activePalette = project?.palette.length ? project.palette : FULL_PALETTE;
+      let next: WorkbenchProject;
+      if (preprocessDraft.mode === "pattern") {
+        if (!result.grid) throw new Error("尚未识别到稳定网格，请调整裁剪框后点“自动对齐拼豆网格”");
+        setPatternImportStatus(`已对齐 ${result.grid.columns}×${result.grid.rows} 格，正在读取色号…`);
+        next = await projectFromPatternImage(
+          result.processed.file,
+          {
+            width: result.grid.columns,
+            height: result.grid.rows,
+            colorSystem: preferences.colorSystem,
+            onStatus: setPatternImportStatus,
+          },
+          activePalette,
+        );
+      } else {
+        setPatternImportStatus("正在按原图比例生成图纸…");
+        next = await projectFromImage(
+          result.processed.file,
+          result.detail,
+          result.detail,
+          project?.optimize.mode ?? "dominant",
+          activePalette,
+        );
+      }
+      const originalName = preprocessDraft.file.name.replace(/\.[^.]+$/, "") || "未命名图纸";
       next = {
         ...next,
+        name: preprocessDraft.mode === "pattern" ? `${originalName}·拼豆` : originalName,
         colorSystem: preferences.colorSystem,
         bead: { ...next.bead, unfinishedOpacity: preferences.unfinishedOpacity },
       };
-      setBlankWidth(next.optimize.width);
-      setBlankHeight(next.optimize.height);
       activateProject(next);
-      setPatternDraft(null);
-      notify(`已保留 ${next.optimize.width}×${next.optimize.height} 格布局并进入拼豆辅助`);
+      setPreprocessDraft(null);
+      notify(preprocessDraft.mode === "pattern"
+        ? `已保留 ${next.optimize.width}×${next.optimize.height} 格布局并进入拼豆辅助`
+        : `已按原图比例生成 ${next.optimize.width}×${next.optimize.height} 格图纸`);
     } catch (error) {
-      notify(error instanceof Error ? error.message : "成品图纸识别失败");
+      notify(error instanceof Error ? error.message : "图片处理失败");
+      throw error;
     } finally {
       setPatternImporting(false);
     }
@@ -376,6 +367,7 @@ export default function ProfessionalWorkbench() {
   const selectedStats = stats.find((item) => item.id === selectedEntry?.id);
 
   const changeStage = (stage: WorkbenchStage) => {
+    setSettingsOpen(false);
     if (stage === "edit" || stage === "bead") setHighlightColorId(null);
     updateProject((current) => ({
       ...current,
@@ -528,9 +520,11 @@ export default function ProfessionalWorkbench() {
     if (!installPrompt) return;
     await installPrompt.prompt();
     const result = await installPrompt.userChoice;
+    setInstallPrompt(null);
     if (result.outcome === "accepted") {
-      setInstallPrompt(null);
       notify("安装请求已发送");
+    } else {
+      setInstallOpen(true);
     }
   };
 
@@ -545,14 +539,6 @@ export default function ProfessionalWorkbench() {
         type="file"
         hidden
         accept="image/*"
-        onChange={handleFileInput}
-      />
-      <input
-        ref={cameraInputRef}
-        type="file"
-        hidden
-        accept="image/*"
-        capture="environment"
         onChange={handleFileInput}
       />
       <input
@@ -577,10 +563,27 @@ export default function ProfessionalWorkbench() {
             <div className="wb-logo-grid"><i /><i /><i /><i /></div>
             <span>七卡瓦</span>
           </div>
+          <div className="wb-home-actions">
+            <button
+              className="wb-home-gallery"
+              type="button"
+              onClick={() => {
+                refreshGallery();
+                setGalleryOpen(true);
+              }}
+            >我的画廊</button>
+            {!standalone && (
+              <button
+                className="wb-home-install"
+                type="button"
+                onClick={() => installPrompt ? installApp() : setInstallOpen(true)}
+              >安装应用</button>
+            )}
+          </div>
           <div className="wb-start-hero">
             <span className="wb-eyebrow">本地 · 私密 · 可安装</span>
             <h1>拼豆专业工作台</h1>
-            <p>从图片或空白底板开始，在一个项目里完成优化、编辑、预览与拼豆。</p>
+            <p>选择照片生成新图纸，或导入现有成品图纸继续拼豆。</p>
           </div>
           <div
             className="wb-dropzone"
@@ -588,39 +591,20 @@ export default function ProfessionalWorkbench() {
             onDrop={(event) => { event.preventDefault(); handleFiles(event.dataTransfer.files); }}
           >
             <div className="wb-upload-icon">⇧</div>
-            <h2>把图片或项目拖到这里</h2>
-            <p>支持 JPEG / PNG / WebP / GIF 第一帧、CSV、.perler 项目</p>
+            <h2>选择你的图片</h2>
+            <p>上传后可先裁剪、旋转和翻转，再生成准确比例的拼豆图纸</p>
             <div className="wb-import-actions">
               <button className="wb-primary" type="button" onClick={() => imageInputRef.current?.click()}>从相册选图</button>
               <button type="button" onClick={() => patternInputRef.current?.click()}>导入成品图纸</button>
-              <button type="button" onClick={() => cameraInputRef.current?.click()}>拍照</button>
-              <button type="button" onClick={() => projectInputRef.current?.click()}>导入项目</button>
             </div>
-          </div>
-          <div className="wb-start-options">
-            <div className="wb-blank-card">
-              <div><strong>创建空白底板</strong><span>最大 200 × 200 格</span></div>
-              <label>宽 <input type="number" min="1" max="200" value={blankWidth} onChange={(e) => setBlankWidth(Number(e.target.value))} /></label>
-              <label>高 <input type="number" min="1" max="200" value={blankHeight} onChange={(e) => setBlankHeight(Number(e.target.value))} /></label>
-              <button type="button" onClick={createBlank}>新建</button>
-            </div>
-            <button className="wb-gallery-card" type="button" onClick={() => { refreshGallery(); setGalleryOpen(true); }}>
-              <span>▦</span><strong>本地画廊</strong><small>{gallery.length} 个项目，仅保存在本设备</small>
-            </button>
-            <button className="wb-gallery-card" type="button" onClick={() => setInstallOpen(true)}>
-              <span>↓</span><strong>安装到手机</strong><small>Android 与 iPhone 均支持</small>
-            </button>
           </div>
           <p className="wb-privacy">🔒 图片处理与项目保存都在你的设备上完成，不上传服务器。</p>
         </section>
       ) : (
         <>
           <header className="wb-header">
-            <button className="wb-brand" type="button" onClick={() => setProject(null)} aria-label="返回启动页">
-              <span className="wb-logo-grid"><i /><i /><i /><i /></span>
-              <span className="wb-brand-text">拼豆工作台</span>
-            </button>
             <nav className="wb-stage-nav" aria-label="工作阶段">
+              <button type="button" onClick={returnHome}>主页</button>
               {STAGES.map((stage) => (
                 <button
                   type="button"
@@ -629,18 +613,14 @@ export default function ProfessionalWorkbench() {
                   onClick={() => changeStage(stage.id)}
                 >{stage.label}</button>
               ))}
+              <button
+                type="button"
+                className={settingsOpen ? "active settings-active" : ""}
+                aria-expanded={settingsOpen}
+                onClick={() => setSettingsOpen(true)}
+              >设置</button>
             </nav>
-            <div className="wb-header-actions">
-              <span className="wb-save-state">{saving ? "保存中…" : "已保存"}</span>
-              <button type="button" onClick={() => setImportOpen(true)}>导入</button>
-              <button type="button" onClick={() => setExportOpen(true)}>下载</button>
-              <button className="accent" type="button" onClick={async () => {
-                try { notify(await shareProject(project) === "shared" ? "已打开系统分享" : "浏览器不支持文件分享，已下载项目"); }
-                catch (error) { if ((error as DOMException)?.name !== "AbortError") notify("分享未完成"); }
-              }}>分享</button>
-              <button type="button" onClick={() => { refreshGallery(); setGalleryOpen(true); }}>画廊</button>
-              {!isStandalone() && <button type="button" onClick={() => setInstallOpen(true)}>安装</button>}
-            </div>
+            <span className="wb-save-state" aria-live="polite">{saving ? "保存中…" : "已保存"}</span>
           </header>
 
           <section className="wb-workspace">
@@ -688,24 +668,32 @@ export default function ProfessionalWorkbench() {
                   </>
                 )}
               </div>
-              <button
-                className="wb-mobile-settings"
-                type="button"
-                onClick={() => setMobileInspectorOpen((value) => !value)}
-                aria-label="打开设置面板"
-              >设置</button>
             </div>
 
-            <aside className={`wb-inspector${mobileInspectorOpen ? " mobile-open" : ""}`}>
-              <div className="wb-inspector-title">
-                <div><span>{project.stage === "optimize" ? "图纸优化" : project.stage === "edit" ? "像素编辑" : project.stage === "preview" ? "图纸预览" : "拼豆引导"}</span><small>{project.optimize.width} × {project.optimize.height}</small></div>
-                <span className="wb-inspector-actions"><button className="wb-inspector-home" type="button" onClick={() => setProject(null)}>⌂</button><button className="wb-inspector-close" type="button" onClick={() => setMobileInspectorOpen(false)} aria-label="关闭设置面板">×</button></span>
-              </div>
+            {settingsOpen && (
+            <Modal
+              title={`${project.stage === "optimize" ? "图纸优化" : project.stage === "edit" ? "像素编辑" : project.stage === "preview" ? "图纸预览" : "拼豆引导"}设置 · ${project.optimize.width}×${project.optimize.height}`}
+              onClose={() => setSettingsOpen(false)}
+            >
+              <div className="wb-settings-content">
               <label className="wb-project-name"><span>项目名</span><input value={project.name} maxLength={60} onChange={(event) => updateProject((current) => ({ ...current, name: event.target.value }))} onBlur={() => updateProject((current) => ({ ...current, name: current.name.trim() || "未命名拼豆项目" }))} /></label>
 
               {project.stage === "optimize" && (
                 <>
                   <Panel title="网格与算法">
+                    {project.sourceImage ? (
+                      <label className="wb-range">
+                        <span>图纸清晰度 <b>{Math.max(project.optimize.width, project.optimize.height)} 级 · {project.optimize.width}×{project.optimize.height} 格</b></span>
+                        <input type="range" min="10" max="200" value={Math.max(project.optimize.width, project.optimize.height)} onChange={(event) => {
+                          const size = gridSizeForAspect(project.sourceImage!.width, project.sourceImage!.height, Number(event.target.value));
+                          updateProject((current) => ({
+                            ...current,
+                            cells: resizeCells(current.cells, current.optimize.width, current.optimize.height, size.width, size.height),
+                            optimize: { ...current.optimize, ...size },
+                          }), true);
+                        }} />
+                      </label>
+                    ) : (
                     <div className="wb-field-row">
                       <label>宽<input type="number" min="1" max="200" value={project.optimize.width} onChange={(e) => {
                         const width = Math.max(1, Math.min(200, Number(e.target.value) || 1));
@@ -716,6 +704,7 @@ export default function ProfessionalWorkbench() {
                         updateProject((current) => ({ ...current, cells: resizeCells(current.cells, current.optimize.width, current.optimize.height, current.optimize.width, height), optimize: { ...current.optimize, height } }), true);
                       }} /></label>
                     </div>
+                    )}
                     <Segmented options={[{ id: "dominant", label: "主色" }, { id: "average", label: "平均色" }]} value={project.optimize.mode} onChange={(mode) => updateProject((current) => ({ ...current, optimize: { ...current.optimize, mode: mode as "dominant" | "average" } }))} />
                     {project.sourceImage && <button className="wb-block-button" type="button" onClick={async () => {
                       if (!window.confirm("重新生成会覆盖当前手动编辑和拼豆完成进度，是否继续？")) return;
@@ -751,7 +740,7 @@ export default function ProfessionalWorkbench() {
               {project.stage === "edit" && (
                 <>
                   <Panel title="编辑工具"><div className="wb-tool-grid">{TOOL_LABELS.map((item) => <button type="button" key={item.id} className={tool === item.id ? "active" : ""} onClick={() => setTool(item.id)}><b>{item.icon}</b><span>{item.label}</span></button>)}</div></Panel>
-                  <Panel title="当前颜色"><div className="wb-current-color"><i style={{ background: paletteEntryById(selectedColorId)?.hex }} /><div><strong>{paletteEntryById(selectedColorId) ? paletteCode(paletteEntryById(selectedColorId)!, project.colorSystem) : "请选择"}</strong><small>{paletteEntryById(selectedColorId)?.hex}</small></div></div><p className="wb-help">点底部色板选择颜色；按住 Alt 或用单指拖动画布，滚轮或双指缩放。</p></Panel>
+                  <Panel title="当前颜色"><button type="button" className="wb-current-color" onClick={() => setColorPickerOpen(true)}><i style={{ background: paletteEntryById(selectedColorId)?.hex }} /><div><strong>{paletteEntryById(selectedColorId) ? paletteCode(paletteEntryById(selectedColorId)!, project.colorSystem) : "请选择"}</strong><small>{paletteEntryById(selectedColorId)?.hex} · 点击打开完整色板</small></div><b>›</b></button><p className="wb-help">可在上方选择吸色或替换同色；单指拖动画布，双指缩放。</p></Panel>
                   <Panel title="历史"><div className="wb-two-buttons"><button type="button" disabled={!history.current.length} onClick={undo}>↶ 撤销</button><button type="button" disabled={!future.current.length} onClick={redo}>↷ 重做</button></div></Panel>
                 </>
               )}
@@ -778,7 +767,18 @@ export default function ProfessionalWorkbench() {
                   {progress === 100 && <div className="wb-complete-card"><span>🎉</span><strong>这张图纸已经拼完了！</strong><button type="button" onClick={() => setExportOpen(true)}>保存成品图纸</button></div>}
                 </>
               )}
-            </aside>
+
+              <Panel title="项目与应用">
+                <div className="wb-settings-actions">
+                  <button type="button" onClick={() => projectInputRef.current?.click()}>导入项目备份</button>
+                  <button type="button" onClick={() => { setSettingsOpen(false); setExportOpen(true); }}>下载与备份</button>
+                  <button type="button" onClick={() => { refreshGallery(); setSettingsOpen(false); setGalleryOpen(true); }}>本地画廊</button>
+                  {!standalone && <button type="button" onClick={() => { setSettingsOpen(false); setInstallOpen(true); }}>安装到手机</button>}
+                </div>
+              </Panel>
+              </div>
+            </Modal>
+            )}
           </section>
 
           <div className="wb-palette-bar" aria-label="颜色色板">
@@ -788,7 +788,10 @@ export default function ProfessionalWorkbench() {
                 <button
                   type="button"
                   key={id}
-                  className={(project.stage === "bead" ? project.bead.selectedColorId : selectedColorId) === id ? "active" : ""}
+                  className={[
+                    (project.stage === "bead" ? project.bead.selectedColorId : selectedColorId) === id ? "active" : "",
+                    project.stage === "bead" && count > 0 && completed === count ? "completed" : "",
+                  ].filter(Boolean).join(" ")}
                   onClick={() => {
                     setSelectedColorId(id);
                     if (project.stage === "optimize" || project.stage === "preview") setHighlightColorId(id);
@@ -796,71 +799,36 @@ export default function ProfessionalWorkbench() {
                   }}
                   title={`${paletteCode(entry!, project.colorSystem)} · ${count} 颗`}
                 >
-                  <i style={{ background: entry!.hex }} /><span>{paletteCode(entry!, project.colorSystem)}</span>{project.stage === "bead" && <small>{completed}/{count}</small>}
+                  <i style={{ background: entry!.hex }} />
+                  <span>{paletteCode(entry!, project.colorSystem)}</span>
+                  {project.stage === "bead" && (completed === count && count > 0 ? <small className="wb-color-complete">✓ 完成</small> : <small>{completed}/{count}</small>)}
                 </button>
               ))}
             </div>
-            <button className="wb-palette-search-button" type="button" onClick={() => setColorPickerOpen(true)}>＋</button>
           </div>
         </>
       )}
 
-      {importOpen && (
-        <Modal title="导入图片或项目" onClose={() => setImportOpen(false)}>
-          <div className="wb-import-grid">
-            <button type="button" onClick={() => patternInputRef.current?.click()}>
-              <b>▦ 导入成品图纸</b><span>保留原网格并匹配色号</span><small>直接进入拼豆辅助</small>
-            </button>
-            <button type="button" onClick={() => imageInputRef.current?.click()}>
-              <b>▣ 从相册选择</b><span>打开手机照片选择器</span><small>不会启动相机</small>
-            </button>
-            <button type="button" onClick={() => cameraInputRef.current?.click()}>
-              <b>◉ 拍照导入</b><span>直接调用后置相机</span><small>拍摄后立即生成图纸</small>
-            </button>
-            <button type="button" onClick={() => projectInputRef.current?.click()}>
-              <b>⇧ 导入项目</b><span>CSV / .perler / JSON</span><small>从文件管理器选择</small>
-            </button>
-          </div>
-          <p className="wb-modal-note">相册入口只接收图片，因此手机会优先打开照片选择器；拍照入口会直接请求相机。</p>
-        </Modal>
-      )}
-
-      {patternDraft && (
-        <Modal title="导入成品图纸" onClose={() => { if (!patternImporting) setPatternDraft(null); }}>
-          <div className="wb-pattern-import">
-            <div className="wb-pattern-preview">
-              <img src={patternDraft.dataUrl} alt="待识别的成品图纸" />
-              <i style={{
-                top: `${patternSettings.cropTop}%`,
-                right: `${patternSettings.cropRight}%`,
-                bottom: `${patternSettings.cropBottom}%`,
-                left: `${patternSettings.cropLeft}%`,
-              }} />
-            </div>
-            <p className="wb-pattern-summary">{patternDraft.file.name} · {patternDraft.imageWidth}×{patternDraft.imageHeight} 像素</p>
-            <div className="wb-pattern-size-fields">
-              <label>横向格数<input type="number" min="1" max="200" value={patternSettings.width} onChange={(event) => setPatternSettings((current) => ({ ...current, width: Math.max(1, Math.min(200, Number(event.target.value) || 1)) }))} /></label>
-              <label>纵向格数<input type="number" min="1" max="200" value={patternSettings.height} onChange={(event) => setPatternSettings((current) => ({ ...current, height: Math.max(1, Math.min(200, Number(event.target.value) || 1)) }))} /></label>
-            </div>
-            <fieldset className="wb-pattern-crop-fields">
-              <legend>裁掉非网格区域（%）</legend>
-              {([
-                ["cropTop", "上"],
-                ["cropRight", "右"],
-                ["cropBottom", "下"],
-                ["cropLeft", "左"],
-              ] as const).map(([key, label]) => (
-                <label key={key}>{label}<input type="number" min="0" max="45" step="0.1" value={patternSettings[key]} onChange={(event) => setPatternSettings((current) => ({ ...current, [key]: Math.max(0, Math.min(45, Number(event.target.value) || 0)) }))} /></label>
-              ))}
-            </fieldset>
-            <Toggle label="将接近纯白的格子视为空位" checked={patternSettings.whiteAsEmpty} onChange={(checked) => setPatternSettings((current) => ({ ...current, whiteAsEmpty: checked }))} />
-            <p className="wb-modal-note">绿框内应只包含拼豆网格。有色号文字时以文字为准、无文字格视为空白；整张图没有色号文字时才按格子颜色匹配。显示仍保留原图颜色。</p>
-            {patternImporting && <p className="wb-pattern-status" role="status">{patternImportStatus}</p>}
-            <div className="wb-pattern-actions">
-              <button type="button" disabled={patternImporting} onClick={() => setPatternDraft(null)}>取消</button>
-              <button className="wb-primary" type="button" disabled={patternImporting} onClick={importFinishedPattern}>{patternImporting ? "识别处理中" : "识别并进入拼豆"}</button>
-            </div>
-          </div>
+      {preprocessDraft && (
+        <Modal
+          title={preprocessDraft.mode === "pattern" ? "对齐并识别成品图纸" : "裁剪并生成图纸"}
+          onClose={() => { if (!patternImporting) setPreprocessDraft(null); }}
+        >
+          {patternImporting && (
+            <p className="wb-pattern-status" role="status">{patternImportStatus}</p>
+          )}
+          <ImagePreprocessEditor
+            draft={preprocessDraft}
+            mode={preprocessDraft.mode}
+            initialDetail={project ? Math.max(project.optimize.width, project.optimize.height) : 40}
+            onCancel={() => setPreprocessDraft(null)}
+            onComplete={completeImagePreprocess}
+          />
+          <p className="wb-modal-note">
+            {preprocessDraft.mode === "pattern"
+              ? "色号图纸以格内文字为准，没有文字的格子按空白处理；整张图都没有色号文字时才改用颜色匹配。"
+              : "裁剪后的长宽比例会被锁定，只用“图纸清晰度”控制格子多少，不会拉伸图片。"}
+          </p>
         </Modal>
       )}
 
@@ -897,9 +865,9 @@ export default function ProfessionalWorkbench() {
 
       {installOpen && (
         <Modal title="安装到手机主屏幕" onClose={() => setInstallOpen(false)}>
-          {isStandalone() ? <div className="wb-installed">✓ 已在独立应用模式中运行</div> : <>
+          {standalone ? <div className="wb-installed">✓ 已在独立应用模式中运行</div> : <>
             <Segmented options={[{ id: "android", label: "Android / 小米" }, { id: "ios", label: "iPhone / iPad" }]} value={installTab} onChange={(value) => { setInstallTab(value as "android" | "ios"); setPreferences((current) => ({ ...current, lastInstallPlatform: value as "android" | "ios" })); }} />
-            {installTab === "android" ? <div className="wb-install-guide"><div className="wb-device-badge">独立应用模式优先推荐 Chrome</div><ol><li>先删除桌面上会出现浏览器栏的旧快捷方式。</li><li>用 <strong>Chrome</strong> 打开工作台的 HTTPS 地址。</li><li>优先点下方“<strong>立即安装应用</strong>”；如果没显示，在 Chrome 菜单选“<strong>安装应用</strong>”。</li><li>从新图标打开后，只保留手机系统状态栏，不再显示浏览器地址栏和底部菜单。</li></ol>{installPrompt && <button className="wb-primary wb-wide" type="button" onClick={installApp}>立即安装应用</button>}<details><summary>小米浏览器里只有“添加至桌面”？</summary><p>这个选项有可能只创建网页快捷方式；如果新图标打开后仍有浏览器栏，就不是独立 PWA。请改用 Chrome 的“安装应用”，不要再保存普通网页快捷方式。</p></details></div> : <div className="wb-install-guide"><div className="wb-device-badge">iOS 必须使用 Safari</div><ol><li>用 <strong>Safari</strong> 打开工作台的 HTTPS 地址。</li><li>点底部工具栏的“<strong>分享</strong>”按钮（方框向上箭头）。</li><li>向下滑并点“<strong>添加到主屏幕</strong>”。</li><li>确认名称后点右上角“添加”。</li></ol><p>如果看不到该选项，请确认不是在微信或其他 App 的内置浏览器中打开。</p></div>}
+            {installTab === "android" ? <div className="wb-install-guide"><div className="wb-device-badge">支持时会安装为独立 PWA</div><ol><li>先删除桌面上会出现浏览器栏的旧网页快捷方式。</li><li>优先点击下方“<strong>立即安装应用</strong>”。</li><li>若没有按钮，请在浏览器菜单中选择“<strong>安装应用</strong>”或“<strong>添加到主屏幕</strong>”。</li><li>从新图标打开；正确安装后不会显示浏览器地址栏和底部菜单。</li></ol>{installPrompt && <button className="wb-primary wb-wide" type="button" onClick={installApp}>立即安装应用</button>}<details open={!installPrompt}><summary>为什么有的浏览器只能建立快捷方式？</summary><p>是否提供独立 PWA 安装由浏览器决定，网页不能强制绕过。若当前浏览器的新图标仍显示地址栏，请用支持“安装应用”的 Chrome、Edge、Firefox、Opera 或 Samsung Internet 打开同一链接后再安装。</p></details></div> : <div className="wb-install-guide"><div className="wb-device-badge">iOS 使用 Safari 添加到主屏幕</div><ol><li>用 <strong>Safari</strong> 打开工作台的 HTTPS 地址。</li><li>点底部工具栏的“<strong>分享</strong>”按钮（方框向上箭头）。</li><li>向下滑并点“<strong>添加到主屏幕</strong>”。</li><li>确认名称后点右上角“添加”。</li></ol><p>如果看不到该选项，请确认不是在微信或其他 App 的内置浏览器中打开。</p></div>}
           </>}
         </Modal>
       )}

@@ -6,8 +6,8 @@ describe("canvas backing-store limits", () => {
     const logicalSize = 100 * 22;
     const scale = canvasBackingScale(logicalSize, logicalSize, 3, true);
     const backingSize = Math.floor(logicalSize * scale);
-    expect(backingSize).toBeLessThanOrEqual(3072);
-    expect(backingSize * backingSize).toBeLessThanOrEqual(8_000_000);
+    expect(backingSize).toBeLessThanOrEqual(2048);
+    expect(backingSize * backingSize).toBeLessThanOrEqual(4_000_000);
   });
 
   it("allows a larger backing store on desktop", () => {
@@ -21,8 +21,7 @@ describe("canvas backing-store limits", () => {
     const logicalSize = 200 * 22;
     const scale = canvasBackingScale(logicalSize, logicalSize, 3, true);
     const backingSize = Math.floor(logicalSize * scale);
-    expect(backingSize).toBeLessThanOrEqual(3072);
-    expect(backingSize * backingSize).toBeLessThanOrEqual(8_000_000);
+    expect(backingSize).toBeLessThanOrEqual(2048);
+    expect(backingSize * backingSize).toBeLessThanOrEqual(4_000_000);
   });
 });
-

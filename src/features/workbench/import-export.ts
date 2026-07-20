@@ -74,14 +74,18 @@ export function loadImage(dataUrl: string): Promise<HTMLImageElement> {
 
 export async function projectFromImage(
   file: File,
-  width: number,
-  height: number,
+  requestedWidth: number,
+  requestedHeight: number,
   mode: PixelationMode = "dominant",
   palette = FULL_PALETTE,
 ): Promise<WorkbenchProject> {
   if (file.size > 40 * 1024 * 1024) throw new Error("图片不能超过 40 MB");
   const dataUrl = await readFileAsDataUrl(file);
   const image = await loadImage(dataUrl);
+  const detail = Math.max(1, Math.min(200, Math.round(Math.max(requestedWidth, requestedHeight))));
+  const imageAspect = image.naturalWidth / Math.max(1, image.naturalHeight);
+  const width = imageAspect >= 1 ? detail : Math.max(1, Math.round(detail * imageAspect));
+  const height = imageAspect >= 1 ? Math.max(1, Math.round(detail / imageAspect)) : detail;
   const canvas = document.createElement("canvas");
   const sampleFactor = Math.max(1, Math.min(4, Math.floor(800 / Math.max(width, height))));
   canvas.width = width * sampleFactor;
@@ -342,7 +346,7 @@ function normalizedBeadCode(value: string): string {
 
 function substitutionCost(left: string, right: string): number {
   if (left === right) return 0;
-  const commonOcrConfusions = ["I1LT7", "O0Q4", "S5", "G68B", "Z2P", "NMH", "VY"];
+  const commonOcrConfusions = ["I1LT7", "O0Q4", "S5", "G68B", "Z2P", "NMH", "VY4", "FP", "CE"];
   return commonOcrConfusions.some((group) => group.includes(left) && group.includes(right)) ? 0.22 : 1;
 }
 
@@ -360,10 +364,248 @@ function editDistance(left: string, right: string): number {
   return row[right.length];
 }
 
+type BinaryGlyph = boolean[][];
+
+// A compact 5 × 7 alphabet is substantially more reliable than general OCR
+// for the 5–9 px labels commonly found in shared bead charts. It is only used
+// as a constrained scorer against codes that actually exist in the selected
+// palette; OCR remains a second, independent signal.
+const CODE_GLYPH_ROWS: Record<string, string> = {
+  A: "01110/10001/10001/11111/10001/10001/10001",
+  B: "11110/10001/10001/11110/10001/10001/11110",
+  C: "01111/10000/10000/10000/10000/10000/01111",
+  D: "11110/10001/10001/10001/10001/10001/11110",
+  E: "11111/10000/10000/11110/10000/10000/11111",
+  F: "11111/10000/10000/11110/10000/10000/10000",
+  G: "01111/10000/10000/10111/10001/10001/01111",
+  H: "10001/10001/10001/11111/10001/10001/10001",
+  I: "11111/00100/00100/00100/00100/00100/11111",
+  J: "00111/00010/00010/00010/10010/10010/01100",
+  K: "10001/10010/10100/11000/10100/10010/10001",
+  L: "10000/10000/10000/10000/10000/10000/11111",
+  M: "10001/11011/10101/10101/10001/10001/10001",
+  N: "10001/11001/10101/10011/10001/10001/10001",
+  O: "01110/10001/10001/10001/10001/10001/01110",
+  P: "11110/10001/10001/11110/10000/10000/10000",
+  Q: "01110/10001/10001/10001/10101/10010/01101",
+  R: "11110/10001/10001/11110/10100/10010/10001",
+  S: "01111/10000/10000/01110/00001/00001/11110",
+  T: "11111/00100/00100/00100/00100/00100/00100",
+  U: "10001/10001/10001/10001/10001/10001/01110",
+  V: "10001/10001/10001/10001/10001/01010/00100",
+  W: "10001/10001/10001/10101/10101/10101/01010",
+  X: "10001/10001/01010/00100/01010/10001/10001",
+  Y: "10001/10001/01010/00100/00100/00100/00100",
+  Z: "11111/00001/00010/00100/01000/10000/11111",
+  "0": "01110/10001/10011/10101/11001/10001/01110",
+  "1": "00100/01100/00100/00100/00100/00100/01110",
+  "2": "01110/10001/00001/00010/00100/01000/11111",
+  "3": "11110/00001/00001/01110/00001/00001/11110",
+  // Tiny chart fonts usually draw an open-top four instead of a diagonal one.
+  "4": "10010/10010/10010/11111/00010/00010/00010",
+  "5": "11111/10000/10000/11110/00001/00001/11110",
+  "6": "01110/10000/10000/11110/10001/10001/01110",
+  "7": "11111/00001/00010/00100/01000/01000/01000",
+  "8": "01110/10001/10001/01110/10001/10001/01110",
+  "9": "01110/10001/10001/01111/00001/00001/01110",
+};
+
+const CODE_GLYPHS = new Map(
+  Object.entries(CODE_GLYPH_ROWS).map(([character, rows]) => [
+    character,
+    rows.split("/").map((row) => [...row].map((pixel) => pixel === "1")),
+  ]),
+);
+
+function templateForCode(code: string): BinaryGlyph | null {
+  const characters = [...code];
+  if (!characters.length || characters.some((character) => !CODE_GLYPHS.has(character))) return null;
+  const width = characters.length * 6 - 1;
+  const template = Array.from({ length: 7 }, () => Array.from({ length: width }, () => false));
+  characters.forEach((character, characterIndex) => {
+    const glyph = CODE_GLYPHS.get(character)!;
+    glyph.forEach((row, y) => row.forEach((pixel, x) => {
+      template[y][characterIndex * 6 + x] = pixel;
+    }));
+  });
+  return template;
+}
+
+function trimGlyph(glyph: BinaryGlyph): BinaryGlyph | null {
+  if (!glyph.length || !glyph[0]?.length) return null;
+  const occupiedRows: number[] = [];
+  const occupiedColumns: number[] = [];
+  glyph.forEach((row, y) => row.forEach((pixel, x) => {
+    if (!pixel) return;
+    occupiedRows.push(y);
+    occupiedColumns.push(x);
+  }));
+  if (occupiedRows.length < 4) return null;
+  const top = Math.min(...occupiedRows);
+  const bottom = Math.max(...occupiedRows);
+  const left = Math.min(...occupiedColumns);
+  const right = Math.max(...occupiedColumns);
+  return glyph.slice(top, bottom + 1).map((row) => row.slice(left, right + 1));
+}
+
+function glyphDistance(source: BinaryGlyph, template: BinaryGlyph): number {
+  const sourceHeight = source.length;
+  const sourceWidth = source[0]?.length ?? 0;
+  if (!sourceHeight || !sourceWidth) return Number.POSITIVE_INFINITY;
+  const templateHeight = template.length;
+  const templateWidth = template[0].length;
+  const resized = Array.from({ length: sourceHeight }, (_, y) =>
+    Array.from({ length: sourceWidth }, (_, x) =>
+      template[Math.min(templateHeight - 1, Math.floor(((y + 0.5) * templateHeight) / sourceHeight))]
+        [Math.min(templateWidth - 1, Math.floor(((x + 0.5) * templateWidth) / sourceWidth))],
+    ),
+  );
+  const directionalDistance = (left: BinaryGlyph, right: BinaryGlyph) => {
+    let total = 0;
+    let count = 0;
+    left.forEach((row, y) => row.forEach((pixel, x) => {
+      if (!pixel) return;
+      count += 1;
+      let nearest = 3;
+      for (let searchY = Math.max(0, y - 2); searchY <= Math.min(right.length - 1, y + 2); searchY += 1) {
+        for (let searchX = Math.max(0, x - 2); searchX <= Math.min(right[0].length - 1, x + 2); searchX += 1) {
+          if (right[searchY][searchX]) {
+            nearest = Math.min(nearest, Math.max(Math.abs(searchX - x), Math.abs(searchY - y)));
+          }
+        }
+      }
+      total += nearest;
+    }));
+    return total / Math.max(1, count);
+  };
+  const sourceAspect = sourceWidth / sourceHeight;
+  const templateAspect = templateWidth / templateHeight;
+  const aspectPenalty = Math.abs(Math.log(Math.max(0.1, sourceAspect / templateAspect))) * 0.22;
+  return directionalDistance(source, resized) + directionalDistance(resized, source) + aspectPenalty;
+}
+
+function codeGlyphFromAnalysis(
+  analysis: PatternCellAnalysis,
+  pixels: Uint8ClampedArray,
+  pixelWidth: number,
+  contrastThreshold: number,
+): BinaryGlyph | null {
+  const cellWidth = Math.max(1, analysis.cellRight - analysis.cellLeft);
+  const cellHeight = Math.max(1, analysis.cellBottom - analysis.cellTop);
+  const left = Math.max(0, Math.floor(analysis.cellLeft + cellWidth * 0.1));
+  const right = Math.max(left + 1, Math.ceil(analysis.cellRight - cellWidth * 0.1));
+  const top = Math.max(0, Math.floor(analysis.cellTop + cellHeight * 0.18));
+  const bottom = Math.max(top + 1, Math.ceil(analysis.cellBottom - cellHeight * 0.18));
+  const [backgroundR, backgroundG, backgroundB] = analysis.background;
+  const glyph = Array.from({ length: bottom - top }, () => Array.from({ length: right - left }, () => false));
+  for (let y = top; y < bottom; y += 1) {
+    for (let x = left; x < right; x += 1) {
+      const offset = (y * pixelWidth + x) * 4;
+      const contrast = Math.max(
+        Math.abs(pixels[offset] - backgroundR),
+        Math.abs(pixels[offset + 1] - backgroundG),
+        Math.abs(pixels[offset + 2] - backgroundB),
+      );
+      glyph[y - top][x - left] = pixels[offset + 3] >= 32 && contrast > contrastThreshold;
+    }
+  }
+  return trimGlyph(glyph);
+}
+
+interface GlyphPaletteMatch {
+  entry: PaletteEntry;
+  glyphScore: number;
+  combinedScore: number;
+}
+
+function aggregateGlyphScore(glyphs: BinaryGlyph[], template: BinaryGlyph): number {
+  const glyphScores = glyphs
+    .map((glyph) => glyphDistance(glyph, template))
+    .filter(Number.isFinite)
+    .sort((left, right) => left - right);
+  if (!glyphScores.length) return Number.POSITIVE_INFINITY;
+  const keep = Math.max(1, Math.min(5, Math.ceil(glyphScores.length * 0.7)));
+  return glyphScores.slice(0, keep).reduce((sum, score) => sum + score, 0) / keep;
+}
+
+function matchGlyphToPalette(
+  glyphs: BinaryGlyph[],
+  sourceHex: string,
+  palette: PaletteEntry[],
+  colorSystem: ColorSystem,
+  texts: string[] = [],
+): GlyphPaletteMatch | null {
+  if (!glyphs.length) return null;
+  const sourceChannels = sourceHex.match(/[0-9A-F]{2}/gi);
+  if (!sourceChannels) return null;
+  const [sourceR, sourceG, sourceB] = sourceChannels.map((value) => Number.parseInt(value, 16));
+  const normalizedTexts = texts
+    .map(normalizedBeadCode)
+    .filter((text) => /^[A-Z]{1,2}[0-9]{1,3}$/.test(text));
+  const partialTexts = texts
+    .map(normalizedBeadCode)
+    .filter((text) => text.length >= 1 && text.length <= 5);
+  let best: GlyphPaletteMatch | null = null;
+  for (const entry of palette) {
+    const rawCode = entry.codes[colorSystem] || entry.codes.MARD;
+    if (!rawCode) continue;
+    const code = normalizedBeadCode(rawCode);
+    if (!/^[A-Z]{1,2}[0-9]{1,3}$/.test(code)) continue;
+    const template = templateForCode(code);
+    if (!template) continue;
+    const glyphScore = aggregateGlyphScore(glyphs, template);
+    if (!Number.isFinite(glyphScore)) continue;
+    const entryChannels = entry.hex.match(/[0-9A-F]{2}/gi);
+    if (!entryChannels) continue;
+    const [entryR, entryG, entryB] = entryChannels.map((value) => Number.parseInt(value, 16));
+    const colorDistance = Math.hypot(sourceR - entryR, sourceG - entryG, sourceB - entryB) / 255;
+    const ocrDistance = normalizedTexts.length
+      ? normalizedTexts
+        .map((text) => editDistance(text, code) / Math.max(text.length, code.length, 1))
+        .sort((left, right) => left - right)
+        .slice(0, 4)
+        .reduce((sum, score, _, values) => sum + score / values.length, 0)
+      : 0.45;
+    const partialOcrDistance = partialTexts.length
+      ? partialTexts
+        .map((text) => editDistance(text, code) / Math.max(text.length, code.length, 1))
+        .sort((left, right) => left - right)
+        .slice(0, 4)
+        .reduce((sum, score, _, values) => sum + score / values.length, 0)
+      : 0.45;
+    const exactVotes = normalizedTexts.filter((text) => text === code).length;
+    const combinedScore =
+      glyphScore +
+      colorDistance * 1.7 +
+      ocrDistance * 0.7 +
+      partialOcrDistance * 0.35 -
+      Math.min(0.55, exactVotes * 0.22);
+    if (!best || combinedScore < best.combinedScore) best = { entry, glyphScore, combinedScore };
+  }
+  return best;
+}
+
+/**
+ * Pure helper used by tests and diagnostics. A null result means the contrast
+ * looks like a watermark/speckle rather than a palette code.
+ */
+export function recognizePrintedCodeGlyph(
+  rows: readonly string[],
+  sourceHex: string,
+  palette: PaletteEntry[],
+  colorSystem: ColorSystem,
+): PaletteEntry | null {
+  const glyph = trimGlyph(rows.map((row) => [...row].map((pixel) => pixel === "#")));
+  if (!glyph) return null;
+  const match = matchGlyphToPalette([glyph], sourceHex, palette, colorSystem);
+  return match && match.glyphScore <= 1.65 ? match.entry : null;
+}
+
 function makeCodePatch(
   analysis: PatternCellAnalysis,
   pixels: Uint8ClampedArray,
   pixelWidth: number,
+  contrastThreshold = 38,
 ): HTMLCanvasElement {
   const sourceWidth = Math.max(1, Math.ceil(analysis.cellRight - analysis.cellLeft));
   const sourceHeight = Math.max(1, Math.ceil(analysis.cellBottom - analysis.cellTop));
@@ -385,7 +627,7 @@ function makeCodePatch(
         Math.abs(pixels[sourceOffset + 1] - backgroundG),
         Math.abs(pixels[sourceOffset + 2] - backgroundB),
       );
-      if (pixels[sourceOffset + 3] >= 32 && contrast > 38) {
+      if (pixels[sourceOffset + 3] >= 32 && contrast > contrastThreshold) {
         const targetOffset = (y * sourceWidth + x) * 4;
         imageData.data[targetOffset] = 0;
         imageData.data[targetOffset + 1] = 0;
@@ -406,7 +648,7 @@ function makeCodePatch(
   return patch;
 }
 
-function bestPaletteEntryForCodes(
+export function bestPaletteEntryForCodes(
   texts: string[],
   initialId: string,
   sourceHex: string,
@@ -416,6 +658,18 @@ function bestPaletteEntryForCodes(
   const normalizedTexts = texts.map(normalizedBeadCode).filter((text) => text.length >= 1 && text.length <= 5);
   const initial = palette.find((entry) => entry.id === initialId) ?? nearestPaletteEntry(sourceHex, palette);
   if (!normalizedTexts.length) return initial;
+  const exactMatches = normalizedTexts
+    .map((text) => palette.find((entry) => {
+      const rawCode = entry.codes[colorSystem] || entry.codes.MARD;
+      return rawCode ? normalizedBeadCode(rawCode) === text : false;
+    }))
+    .filter((entry): entry is PaletteEntry => Boolean(entry));
+  if (exactMatches.length) {
+    const counts = new Map<string, number>();
+    exactMatches.forEach((entry) => counts.set(entry.id, (counts.get(entry.id) ?? 0) + 1));
+    const exactId = [...counts.entries()].sort((left, right) => right[1] - left[1])[0]?.[0];
+    return palette.find((entry) => entry.id === exactId) ?? exactMatches[0];
+  }
   const [sourceR, sourceG, sourceB] = sourceHex.match(/[0-9A-F]{2}/g)!.map((value) => Number.parseInt(value, 16));
   let best = initial;
   let bestScore = Number.POSITIVE_INFINITY;
@@ -430,8 +684,10 @@ function bestPaletteEntryForCodes(
       .reduce((sum, value, _, values) => sum + value / values.length, 0);
     const [entryR, entryG, entryB] = entry.hex.match(/[0-9A-F]{2}/g)!.map((value) => Number.parseInt(value, 16));
     const colorDistance = Math.sqrt((sourceR - entryR) ** 2 + (sourceG - entryG) ** 2 + (sourceB - entryB) ** 2) / 255;
-    const initialBonus = entry.id === initialId ? -0.12 : 0;
-    const score = ocrDistance * 2 + colorDistance * 2 + initialBonus;
+    const initialBonus = entry.id === initialId ? -0.04 : 0;
+    // Printed text remains the primary signal, while the fill corrects common
+    // single-stroke OCR ambiguities such as E16 → EI8/E18.
+    const score = ocrDistance * 3 + colorDistance * 2 + initialBonus;
     if (score < bestScore) {
       best = entry;
       bestScore = score;
@@ -463,32 +719,103 @@ async function applyPrintedCodes(
   });
   onStatus?.(`检测到色号文字，正在识别 ${groups.size} 组颜色…`);
 
+  let recognize: OcradRecognizer | null = null;
   try {
-    const recognize = await loadOcrad();
-    let groupNumber = 0;
-    for (const [initialId, indices] of groups) {
-      groupNumber += 1;
-      onStatus?.(`正在读取色号 ${groupNumber}/${groups.size}…`);
-      const representatives = [...indices]
-        .sort((left, right) => analyses[right].labelInkPixels - analyses[left].labelInkPixels)
-        .slice(0, 4);
-      const texts: string[] = [];
-      for (const index of representatives) {
-        const text = recognize(makeCodePatch(analyses[index], pixels, pixelWidth)).trim();
-        if (text) texts.push(text);
-      }
-      const sample = analyses[indices[0]].cell;
-      if (!sample.colorId || !sample.sourceHex) continue;
-      const matched = bestPaletteEntryForCodes(texts, initialId, sample.sourceHex, palette, colorSystem);
-      indices.forEach((index) => {
-        cells[index] = { ...cells[index], colorId: matched.id };
-      });
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
-    }
+    recognize = await loadOcrad();
   } catch {
-    // Text presence still determines occupied cells. Color matching remains a
-    // safe fallback when the OCR model cannot load on a particular phone.
-    onStatus?.("文字模型暂不可用，已保留文字格并按颜色纠错");
+    // The dedicated glyph matcher below works offline. OCR is a useful second
+    // vote, but must never decide whether a watermark is a bead.
+    onStatus?.("通用文字模型暂不可用，改用本地色号字形识别");
+  }
+
+  let groupNumber = 0;
+  for (const [initialId, indices] of groups) {
+    groupNumber += 1;
+    onStatus?.(`正在读取色号 ${groupNumber}/${groups.size}…`);
+    const inkValues = indices.map((index) => analyses[index].labelInkPixels).sort((left, right) => left - right);
+    const medianInk = inkValues[Math.floor(inkValues.length / 2)] ?? 0;
+    // Watermarks add far more contrast than a two/three-character code. Cells
+    // nearest the group median are therefore safer representatives than the
+    // previous "highest ink first" strategy.
+    const representatives = [...indices]
+      .sort((left, right) =>
+        Math.abs(analyses[left].labelInkPixels - medianInk) -
+        Math.abs(analyses[right].labelInkPixels - medianInk),
+      )
+      .slice(0, 8);
+    const glyphs = representatives.flatMap((index) =>
+      [34, 42, 52]
+        .map((threshold) => codeGlyphFromAnalysis(analyses[index], pixels, pixelWidth, threshold))
+        .filter((glyph): glyph is BinaryGlyph => Boolean(glyph)),
+    );
+    const texts: string[] = [];
+    if (recognize) {
+      for (const index of representatives.slice(0, 4)) {
+        for (const threshold of [34, 48]) {
+          const text = recognize(makeCodePatch(analyses[index], pixels, pixelWidth, threshold)).trim();
+          if (text) texts.push(text);
+        }
+      }
+    }
+    const medianBackground = ([0, 1, 2] as const).map((channel) => {
+      const values = representatives
+        .map((index) => analyses[index].background[channel])
+        .sort((left, right) => left - right);
+      return values[Math.floor(values.length / 2)] ?? 255;
+    }) as [number, number, number];
+    const sourceHex = rgbHex(...medianBackground);
+    const glyphMatch = matchGlyphToPalette(glyphs, sourceHex, palette, colorSystem, texts);
+    const hasValidOcrVote = texts.some((text) => /^[A-Z]{1,2}[0-9]{1,3}$/.test(normalizedBeadCode(text)));
+    if (!glyphMatch || (glyphMatch.glyphScore > 1.3 && !hasValidOcrVote)) {
+      // Contrast without a plausible palette-code shape is normally a
+      // diagonal watermark, app overlay, or screenshot compression speckle.
+      indices.forEach((index) => {
+        cells[index] = { colorId: null, completed: false };
+      });
+    } else {
+      const matched = glyphMatch.glyphScore <= 1.65
+        ? glyphMatch.entry
+        : bestPaletteEntryForCodes(texts, initialId, sourceHex, palette, colorSystem);
+      const matchedCode = normalizedBeadCode(matched.codes[colorSystem] || matched.codes.MARD || "");
+      const matchedTemplate = templateForCode(matchedCode);
+      indices.forEach((index) => {
+        let colorId = matched.id;
+        const cellGlyphs = [34, 42, 52]
+          .map((threshold) => codeGlyphFromAnalysis(analyses[index], pixels, pixelWidth, threshold))
+          .filter((glyph): glyph is BinaryGlyph => Boolean(glyph));
+        const centralGlyph = cellGlyphs[1] ?? cellGlyphs[0];
+        const localSourceHex = analyses[index].cell.sourceHex ?? sourceHex;
+        const localMatch = cellGlyphs.length
+          ? matchGlyphToPalette(cellGlyphs, localSourceHex, palette, colorSystem)
+          : null;
+        if (!localMatch || localMatch.glyphScore > 1.7) {
+          // This individual cell has contrast, but none of the legal palette
+          // codes resembles it. Do not let a genuine white-code group turn a
+          // watermark crossing otherwise empty cells into extra beads.
+          cells[index] = { colorId: null, completed: false };
+          return;
+        }
+        if (matchedTemplate && centralGlyph) {
+          const observedAspect = (centralGlyph[0]?.length ?? 1) / Math.max(1, centralGlyph.length);
+          const matchedAspect = matchedTemplate[0].length / matchedTemplate.length;
+          // A nearest-color bucket can contain two pale codes (notably E16
+          // and H2). Different code lengths expose that mixture even when the
+          // screenshot colors are indistinguishable.
+          if (Math.abs(Math.log(Math.max(0.1, observedAspect / matchedAspect))) > 0.32) {
+            const matchedGlyphScore = aggregateGlyphScore(cellGlyphs, matchedTemplate);
+            if (
+              localMatch.entry.id !== matched.id &&
+              localMatch.glyphScore < 1.05 &&
+              localMatch.glyphScore + 0.16 < matchedGlyphScore
+            ) {
+              colorId = localMatch.entry.id;
+            }
+          }
+        }
+        cells[index] = { ...cells[index], colorId };
+      });
+    }
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
   }
   return cells;
 }

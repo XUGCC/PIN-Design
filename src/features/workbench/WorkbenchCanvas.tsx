@@ -75,9 +75,12 @@ export default function WorkbenchCanvas({
   const lastStrokeIndex = useRef<number | null>(null);
   const logicalWidth = project.optimize.width * CELL_SIZE;
   const logicalHeight = project.optimize.height * CELL_SIZE;
+  // Reserve the compact bead controls so short landscape screens never hide
+  // the first or last rows underneath the overlays.
+  const verticalControlInset = project.stage === "bead" ? 120 : 36;
   const fitScale = Math.min(
     Math.max(0.02, (viewport.width - 36) / Math.max(1, logicalWidth)),
-    Math.max(0.02, (viewport.height - 36) / Math.max(1, logicalHeight)),
+    Math.max(0.02, (viewport.height - verticalControlInset) / Math.max(1, logicalHeight)),
     1.35,
   );
   const displayScale = fitScale * view.zoom;
@@ -453,10 +456,6 @@ export default function WorkbenchCanvas({
     }));
   };
 
-  const resetView = () => {
-    updateView(() => ({ zoom: 1, x: 0, y: 0 }), true);
-  };
-
   const handlePointerCancel = (event: ReactPointerEvent<HTMLDivElement>) => {
     pointers.current.delete(event.pointerId);
     if (pointers.current.size === 0) setGestureActive(false);
@@ -489,12 +488,6 @@ export default function WorkbenchCanvas({
         className={`wb-canvas${compareOriginal && project.sourceImage ? " wb-canvas-half" : ""}`}
         style={{ transform }}
       />
-      <div className="wb-zoom-tools" aria-label="画布缩放">
-        <button type="button" onClick={() => updateView((current) => ({ ...current, zoom: Math.min(8, current.zoom * 1.2) }))} aria-label="放大">＋</button>
-        <button type="button" onClick={resetView} aria-label="适应画布">⌖</button>
-        <button type="button" onClick={() => updateView((current) => ({ ...current, zoom: Math.max(0.55, current.zoom / 1.2) }))} aria-label="缩小">−</button>
-      </div>
-      <div className="wb-zoom-label">{Math.round(displayScale * 100)}%</div>
     </div>
   );
 }

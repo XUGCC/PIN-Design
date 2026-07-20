@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { extractPatternCells, parseCsv, projectToCsv, validateImportFile } from "./import-export";
+import {
+  bestPaletteEntryForCodes,
+  extractPatternCells,
+  parseCsv,
+  projectToCsv,
+  recognizePrintedCodeGlyph,
+  validateImportFile,
+} from "./import-export";
 import type { PaletteEntry } from "./model";
 
 describe("file import validation", () => {
@@ -98,5 +105,60 @@ describe("finished pattern recognition", () => {
     );
     expect(cell.colorId).toBe("white");
     expect(cell.sourceHex).toBe("#FAF8F6");
+  });
+
+  it("lets an exact printed code override a misleading background color", () => {
+    const matched = bestPaletteEntryForCodes(
+      ["G1"],
+      "red",
+      "#E33232",
+      palette,
+      "MARD",
+    );
+    expect(matched.id).toBe("green");
+  });
+
+  it("uses fill color to resolve an ambiguous OCR stroke", () => {
+    const palePalette: PaletteEntry[] = [
+      { id: "e16", hex: "#FFF3EB", codes: { MARD: "E16" } },
+      { id: "e18", hex: "#FFC7DB", codes: { MARD: "E18" } },
+    ];
+    expect(bestPaletteEntryForCodes(["EI8"], "e16", "#FCF6F4", palePalette, "MARD").id).toBe("e16");
+  });
+
+  it("recognizes a tiny printed code even when screenshot color points elsewhere", () => {
+    const chartPalette: PaletteEntry[] = [
+      { id: "e4", hex: "#E8649E", codes: { MARD: "E04" } },
+      { id: "r27", hex: "#EA8CB1", codes: { MARD: "R27" } },
+      { id: "e9", hex: "#E970CC", codes: { MARD: "E09" } },
+    ];
+    // Binary rows sampled from a compressed 52 × 52 chart. The isolated
+    // corner pixels imitate a faint diagonal watermark crossing the cell.
+    const glyph = [
+      "#...#####.##.##.",
+      ".#..#####.##.##.",
+      "....###...##.##.",
+      "....#####.#####.",
+      "....#####.#####.",
+      "....##......##..",
+      "....#####...##..",
+      "....####....##.#",
+    ];
+
+    expect(recognizePrintedCodeGlyph(glyph, "#DB87AB", chartPalette, "MARD")?.id).toBe("e4");
+  });
+
+  it("rejects diagonal watermark contrast that has no color-code shape", () => {
+    const watermark = [
+      "#..............",
+      ".##............",
+      "...##..........",
+      ".....##........",
+      ".......##......",
+      ".........##....",
+      "...........##..",
+      ".............##",
+    ];
+    expect(recognizePrintedCodeGlyph(watermark, "#FFFFFF", palette, "MARD")).toBeNull();
   });
 });
